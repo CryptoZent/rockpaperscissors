@@ -4,8 +4,8 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract RockPaperScissors {
-    enum Move { Rock, Paper, Scissors }
-    enum GameState { WaitingForPlayers, InProgress, Finished }
+    enum Move { None, Rock, Paper, Scissors }
+    enum GameState { WaitingForPlayers, InProgress, Finished, ExceedTime }
 
     address public admin;
     IERC20 public usdtToken;
@@ -18,13 +18,13 @@ contract RockPaperScissors {
         Move player1Move;
         Move player2Move;
         GameState state;
-        uint256 panelWeight; // Weight of the game panel (10, 50, 100, 1000)
+        uint256 panelWeight;
+        uint256 startTime; // Game start time
     }
 
     Game[] public games;
     mapping(address => uint256) public winnings;
 
-    // Game panel weights
     uint256[] public availableWeights = [10, 50, 100, 1000];
 
     modifier onlyAdmin() {
@@ -47,63 +47,96 @@ contract RockPaperScissors {
         usdtToken = IERC20(_usdtToken);
     }
 
-    // Function to create a game with a specific panel weight (10, 50, 100, or 1000)
     function createGame(uint256 panelWeight) external {
         require(isValidWeight(panelWeight), "Invalid weight selected");
         update();
+
         games.push(Game({
             player1: msg.sender,
             player2: address(0),
             player1Stake: panelWeight,
             player2Stake: 0,
-            player1Move: Move(0),
-            player2Move: Move(0),
+            player1Move: Move.None,
+            player2Move: Move.None,
             state: GameState.WaitingForPlayers,
-            panelWeight: panelWeight
+            panelWeight: panelWeight,
+            startTime: block.timestamp
         }));
 
-        // Player 1 stakes the specified panel weight
         usdtToken.transferFrom(msg.sender, address(this), panelWeight);
     }
 
-    // Function to join an existing game with a specific panel weight
     function joinGame(uint256 gameId) external inState(gameId, GameState.WaitingForPlayers) {
+        update();
         Game storage game = games[gameId];
         require(game.player2 == address(0), "Game already has two players");
-        update();
-        uint256 stakeAmount = game.panelWeight;
-        game.player2 = msg.sender;
-        game.player2Stake = stakeAmount;
-        game.state = GameState.InProgress;
 
-        // Player 2 stakes the same amount as Player 1
-        usdtToken.transferFrom(msg.sender, address(this), stakeAmount);
+        game.player2 = msg.sender;
+        game.player2Stake = game.panelWeight;
+        game.state = GameState.InProgress;
+        game.startTime = block.timestamp; // Reset timer when both players join
+
+        usdtToken.transferFrom(msg.sender, address(this), game.panelWeight);
     }
 
-    // Function to make a move in the game (Rock, Paper, or Scissors)
     function makeMove(uint256 gameId, Move move) external onlyPlayer(gameId) inState(gameId, GameState.InProgress) {
         update();
         Game storage game = games[gameId];
+
         if (msg.sender == game.player1) {
             game.player1Move = move;
         } else {
             game.player2Move = move;
         }
 
-        // Check if both players have made their move
-        if (game.player1Move != Move(0) && game.player2Move != Move(0)) {
+        if (game.player1Move != Move.None && game.player2Move != Move.None) {
             endGame(gameId);
         }
     }
 
-    // Internal function to determine the winner and distribute the winnings
+    function update() public {
+        for (uint256 i = 0; i < games.length; i++) {
+            if (
+                games[i].state == GameState.WaitingForPlayers ||
+                games[i].state == GameState.InProgress
+            ) {
+                if (block.timestamp > games[i].startTime + 1 minutes) {
+                    games[i].state = GameState.ExceedTime;
+                }
+            }
+        }
+    }
+
+    function getActiveGames() external view returns (Game[] memory) {
+        uint256 count;
+        for (uint256 i = 0; i < games.length; i++) {
+            if (
+                games[i].state == GameState.WaitingForPlayers ||
+                games[i].state == GameState.InProgress
+            ) {
+                count++;
+            }
+        }
+
+        Game[] memory activeGames = new Game[](count);
+        uint256 index;
+        for (uint256 i = 0; i < games.length; i++) {
+            if (
+                games[i].state == GameState.WaitingForPlayers ||
+                games[i].state == GameState.InProgress
+            ) {
+                activeGames[index++] = games[i];
+            }
+        }
+        return activeGames;
+    }
+
     function endGame(uint256 gameId) internal {
         Game storage game = games[gameId];
         address winner;
 
-        // Determine winner based on the Rock-Paper-Scissors rules
         if (game.player1Move == game.player2Move) {
-            winner = address(0); // Draw
+            winner = address(0);
         } else if (
             (game.player1Move == Move.Rock && game.player2Move == Move.Scissors) ||
             (game.player1Move == Move.Paper && game.player2Move == Move.Rock) ||
@@ -114,17 +147,15 @@ contract RockPaperScissors {
             winner = game.player2;
         }
 
-        // Total prize pool is twice the stake of the game panel
         uint256 totalPrize = game.panelWeight * 2;
 
         if (winner != address(0)) {
-            winnings[winner] += totalPrize; // Award the winner the total prize
+            winnings[winner] += totalPrize;
         }
 
         game.state = GameState.Finished;
     }
 
-    // Function for players to withdraw their winnings
     function withdrawWinnings() external {
         uint256 amount = winnings[msg.sender];
         require(amount > 0, "No winnings to withdraw");
@@ -132,17 +163,12 @@ contract RockPaperScissors {
         usdtToken.transfer(msg.sender, amount);
     }
 
-    // Helper function to validate if the weight is valid (10, 50, 100, or 1000)
     function isValidWeight(uint256 weight) internal view returns (bool) {
-        for (uint i = 0; i < availableWeights.length; i++) {
+        for (uint256 i = 0; i < availableWeights.length; i++) {
             if (availableWeights[i] == weight) {
                 return true;
             }
         }
         return false;
     }
-
-    function update() internal {
-        //game update status as archi
-    } 
 }
